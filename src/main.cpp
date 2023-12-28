@@ -1,42 +1,10 @@
 #include <Arduino.h>
-
-/**************************************************************************
- *
- * Interfacing ESP8266 NodeMCU with ST7789 TFT display (240x240 pixel).
- * Graphics test example.
- * This is a free software with NO WARRANTY.
- * https://simple-circuit.com/
- *
- *************************************************************************/
-/**************************************************************************
-  This is a library for several Adafruit displays based on ST77* drivers.
-
-  Works with the Adafruit 1.8" TFT Breakout w/SD card
-    ----> http://www.adafruit.com/products/358
-  The 1.8" TFT shield
-    ----> https://www.adafruit.com/product/802
-  The 1.44" TFT breakout
-    ----> https://www.adafruit.com/product/2088
-  as well as Adafruit raw 1.8" TFT display
-    ----> http://www.adafruit.com/products/618
-
-  Check out the links above for our tutorials and wiring diagrams.
-  These displays use SPI to communicate, 4 or 5 pins are required to
-  interface (RST is optional).
-
-  Adafruit invests time and resources providing this open source code,
-  please support Adafruit and open-source hardware by purchasing
-  products from Adafruit!
-
-  Written by Limor Fried/Ladyada for Adafruit Industries.
-  MIT license, all text above must be included in any redistribution
- *************************************************************************/
-
 #include <Adafruit_ST7789.h>
 
 #include <Orbitron_Medium_40.h>
 #include <Orbitron_Bold_20.h>
 #include <lato_Bold_Italic_20.h>
+#include <Roboto_Condensed_Light_Italic_24.h>
 #include <SHT31.h>
 #include <weather_icons.h>
 
@@ -105,26 +73,46 @@ String todayForecast, dayoneForecast, daytwoForecast, daythreeForecast;
 
 unsigned long previousMillis = 0; // will store last time LED was updated
 // constants won't change:
-const long interval = 1000;   // milliiseconds
+const long interval = 60000;  // milliiseconds
 const long pubinterval = 600; // interval at which to publish in seconds. this is done by counting number of intervals
 unsigned long intervalcount = 0;
 
-String city = "";
-float lati = 0;
-float longi = 0;
+typedef struct
+{
+  String city = "";
+  String timezone = ""; // String timezone
+  long utc_offset = 0;  // unix time
+  String sunRise = "";
+  String sunSet = "";
+  float lat = 0;
+  float lon = 0;
+  float temp = 0;
+  float forecast[12];
+  uint32_t forecastTime[12];
+  String units = "";
+  int weather_code = 0;
+} Weather;
+
+Weather weather;
 
 void drawTimeConsole(void);
 void drawTemperatureConsole(void);
-void drawWeatherBitmap(int x, int y, String forecast);
+void drawWeatherBitmap(int x, int y);
 void ledBlink(void);
 void getCity(void);
-int getTimezone(void);
-void weatherApi(void);
+// int getTimezone(void);
+String weatherApi(String url);
+void getSunriseSunset();
+void getWeather();
+void getForecast();
 
-uint32_t _epoch = 1703114897;
+// uint32_t _epoch = 1703114897;
 
-const char *ssid = "Casa do Tadeuzinho";
-const char *password = "#1nt3rn3t!";
+// const char *ssid = "Casa do Tadeuzinho";
+// const char *password = "#1nt3rn3t!";
+
+const char *ssid = "PU3D";
+const char *password = "#printup365";
 
 WiFiUDP ntpUDP;
 
@@ -135,10 +123,6 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
 
 void setup(void)
 {
-
-  // set time zone to pacific standard time
-  // Time.zone(-7);
-
   pinMode(LED_RED, OUTPUT);
   pinMode(LED_BLUE, OUTPUT);
   pinMode(BACKLIGHT, OUTPUT);
@@ -175,24 +159,30 @@ void setup(void)
   tft.drawLine(0, 120, 240, 120, 0x8c71); // gray
   tft.drawLine(0, 199, 240, 199, 0x8c71); // gray
 
-  Serial.print("MOSI: ");
-  Serial.println(MOSI);
-  Serial.print("MISO: ");
-  Serial.println(MISO);
-  Serial.print("SCK: ");
-  Serial.println(SCK);
-  Serial.print("SS: ");
-  Serial.println(SS);
-
+  /*
+    Serial.print("MOSI: ");
+    Serial.println(MOSI);
+    Serial.print("MISO: ");
+    Serial.println(MISO);
+    Serial.print("SCK: ");
+    Serial.println(SCK);
+    Serial.print("SS: ");
+    Serial.println(SS);
+  */
   getCity();
-  timeClient.setTimeOffset(getTimezone());
+  getWeather();
+  getForecast();
+  timeClient.setTimeOffset(weather.utc_offset);
   timeClient.update();
+
   // display the time and temperature and then update it regularly in the loop function
 
-  delay(15000);
+  // delay(15000);
+
+  getSunriseSunset();
 
   drawTimeConsole();
-  // drawTemperatureConsole();
+  drawTemperatureConsole();
 }
 
 void loop()
@@ -200,15 +190,29 @@ void loop()
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= interval)
   {
-    // timeClient.update();
-    if (city.isEmpty())
+    previousMillis = currentMillis;
+    if (weather.city == "")
     {
       getCity();
     }
 
-    previousMillis = currentMillis;
+    int i = 0;
+    for (i; i < 12; i++)
+    {
+      if (hour(timeClient.getEpochTime()) == hour(weather.forecastTime[i]))
+        weather.temp = weather.forecast[i];
+      break;
+    }
+    Serial.println(i);
+
+    if (i > 11)
+    {
+      Serial.println("Updating hourly forecast");
+      getForecast(); // update hourly forecast temp
+    }
+
     drawTimeConsole();
-    // drawTemperatureConsole();
+    drawTemperatureConsole();
 
     // ledBlink();
     intervalcount++;
@@ -231,7 +235,6 @@ void getCity(void)
     WiFiClient client;
     HTTPClient http;
     String url = "http://ip-api.com/json/";
-    city = "";
 
     if (http.begin(client, url))
     {
@@ -249,7 +252,7 @@ void getCity(void)
           DynamicJsonDocument jsonDoc(1024);
           DeserializationError error = deserializeJson(jsonDoc, payload);
 
-          serializeJsonPretty(jsonDoc, Serial);
+          // serializeJsonPretty(jsonDoc, Serial);
 
           // Check for parsing errors
           const char *value = jsonDoc["status"];
@@ -257,16 +260,15 @@ void getCity(void)
           if (!error && String(value) == "success")
           {
             const char *value = jsonDoc["city"];
-            city = String(value);
-            const char *lat = jsonDoc["lat"];
-            //lati = atof(lat);
-            const char *lon = jsonDoc["lon"];
-            //longi = atof(lon);
-            Serial.println(city);
-            Serial.println(value);
-            Serial.println(lat);
-            Serial.println(lon);
-            return;
+            weather.city = String(value);
+            weather.lat = jsonDoc["lat"];
+            weather.lon = jsonDoc["lon"];
+            const char *_timeZone = jsonDoc["timezone"];
+            weather.timezone = String(_timeZone);
+            // Serial.println(timeZone);
+            //  Serial.println(value);
+            //  Serial.println(lat, 4);
+            //  Serial.println(lon, 4);
           }
           else
           {
@@ -279,92 +281,27 @@ void getCity(void)
       {
         Serial.println("HTTP GET request failed");
       }
-
-      http.end();
     }
     else
     {
       Serial.println("Unable to connect to server");
     }
+    http.end();
+    return;
   }
 }
 
-int getTimezone(void)
-{
-
-  if (WiFi.status() == WL_CONNECTED)
-  { // Check WiFi connection status
-
-    WiFiClient client;
-    HTTPClient http;
-    String url = "http://worldtimeapi.org/api/ip";
-
-    if (http.begin(client, url))
-    {
-      int httpCode = http.GET();
-
-      if (httpCode > 0)
-      {
-        if (httpCode == HTTP_CODE_OK)
-        {
-          String payload = http.getString();
-          // Serial.println("HTTP GET request successful");
-          // Serial.println("Response: " + payload);
-
-          // Parse the JSON string
-          DynamicJsonDocument jsonDoc(1024);
-          DeserializationError error = deserializeJson(jsonDoc, payload);
-
-          
-
-          const char *value = jsonDoc["abbreviation"];
-
-          if (value != nullptr && value[0] != '\0')
-          {
-            // Check for parsing errors
-            int offset = String(value).toInt();
-            offset = offset * 60 * 60;
-            // timeClient.setTimeOffset(offset);
-            Serial.println(offset);
-            return offset;
-          }
-          else
-          {
-            Serial.print("Failed to parse JSON: ");
-            Serial.println(error.c_str());
-            return 0;
-          }
-        }
-        else
-        {
-          Serial.println("HTTP GET request failed");
-        }
-
-        http.end();
-        return 0;
-      }
-      else
-      {
-        Serial.println("Unable to connect to server");
-        return 0;
-      }
-    }
-  }
-  return 0;
-}
-
-/*
 // The webhook response data will contain the sunrise and sunset time together as a string
-void getSunriseSunset(const char *event, const char *data)
+void getSunriseSunset(void)
 {
   tft.setTextColor(ST77XX_YELLOW, ST77XX_BLACK);
   tft.setFont();
   tft.setTextSize(2);
   tft.setCursor(5, 175);
-  tft.print(data);
+  tft.print(weather.sunRise);
+  tft.setCursor(85, 175);
+  tft.print(weather.sunSet);
 }
-
-*/
 
 String numtoWeekday(int num)
 {
@@ -514,9 +451,9 @@ void drawTimeConsole(void)
   timeCanvas.setTextSize(1);
   timeCanvas.setTextColor(COLOR_PINK);
   timeCanvas.setCursor(0, 105);
-  timeCanvas.print(city);
+  timeCanvas.print(weather.city);
 
-  // drawWeatherBitmap(192, 45, todayForecast);
+  drawWeatherBitmap(192, 45);
 
   timeCanvas.setFont();
   timeCanvas.setTextSize(2);
@@ -538,12 +475,10 @@ void drawTimeConsole(void)
   tft.drawRGBBitmap(0, 0, timeCanvas.getBuffer(), timeCanvas.width(), timeCanvas.height());
 }
 
-/*
-
 void drawTemperatureConsole(void)
 {
-  float temp = ((sht31.getTemperature()) * 1.8) + 32;
-  float hum = sht31.getHumidity();
+  float temp = 30; //((sht31.getTemperature()) * 1.8) + 32;
+  float hum = 55;  // sht31.getHumidity();
 
   temperatureCanvas.fillScreen(ST77XX_BLACK);
   temperatureCanvas.drawRGBBitmap(5, 10, thermometer, 15, 30);
@@ -552,14 +487,16 @@ void drawTemperatureConsole(void)
   temperatureCanvas.setFont(&Roboto_Condensed_Light_Italic_24);
   temperatureCanvas.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
   temperatureCanvas.setCursor(30, 30);
-  temperatureCanvas.print(temp);
-  temperatureCanvas.print("F");
+  temperatureCanvas.print(weather.temp);
+  temperatureCanvas.print(weather.units);
   temperatureCanvas.setCursor(140, 30);
   temperatureCanvas.print(hum);
   temperatureCanvas.print("%rH");
 
   tft.drawRGBBitmap(0, 200, temperatureCanvas.getBuffer(), temperatureCanvas.width(), temperatureCanvas.height());
 }
+
+/*
 
 void getNightWeather(const char *event, const char *night_data)
 {
@@ -666,46 +603,50 @@ void getDayWeather(const char *event, const char *day_data)
   else
     Serial.println("Not today");
 }
-
-void drawWeatherBitmap(int x, int y, String forecast)
+*/
+void drawWeatherBitmap(int x, int y)
 {
-  if (!strcmp(forecast.c_str(), "Sunny"))
+  if (weather.weather_code == 0)
     timeCanvas.drawRGBBitmap(x, y, sunny, 40, 40);
 
-  if (!strcmp(forecast.c_str(), "Mostly Sunny"))
+  if (weather.weather_code == 2)
     timeCanvas.drawRGBBitmap(x, y, partial_cloudy, 40, 40);
 
-  else if (!strcmp(forecast.c_str(), "Clear"))
+  else if (weather.weather_code == 1)
     timeCanvas.drawRGBBitmap(x, y, moon, 40, 40);
 
-  else if (!strcmp(forecast.c_str(), "Mostly Clear"))
+  else if (weather.weather_code == 1)
     timeCanvas.drawRGBBitmap(x, y, moon, 40, 40);
 
-  else if (!strcmp(forecast.c_str(), "Partly Cloudy"))
+  else if (weather.weather_code == 2)
     timeCanvas.drawRGBBitmap(x, y, cloudy, 40, 40);
 
-  else if (forecast.indexOf("Cloudy") > 0)
+  else if (weather.weather_code == 3)
     timeCanvas.drawRGBBitmap(x, y, cloud, 40, 40);
 
-  else if (!strcmp(forecast.c_str(), "Showers"))
+  // else if (!strcmp(forecast.c_str(), "Windy"))
+  //   timeCanvas.drawRGBBitmap(x, y, windy, 40, 40);
+  else if (weather.weather_code == 61)
+    timeCanvas.drawRGBBitmap(x, y, rain, 40, 40);
+  else if (weather.weather_code == 63)
+    timeCanvas.drawRGBBitmap(x, y, rain, 40, 40);
+  else if (weather.weather_code == 65)
     timeCanvas.drawRGBBitmap(x, y, rain, 40, 40);
 
-  else if (!strcmp(forecast.c_str(), "Windy"))
-    timeCanvas.drawRGBBitmap(x, y, windy, 40, 40);
-
-  else if (forecast.indexOf("Rain") > 0)
-    timeCanvas.drawRGBBitmap(x, y, rain, 40, 40);
-
-  else if (forecast.indexOf("thunder") > 0)
+  else if (weather.weather_code == 95)
     timeCanvas.drawRGBBitmap(x, y, rain_thunder, 40, 40);
 
-  else if (forecast.indexOf("Snow") > 0)
+  else if (weather.weather_code == 71)
+    timeCanvas.drawRGBBitmap(x, y, snow, 40, 40);
+    else if (weather.weather_code == 73)
+    timeCanvas.drawRGBBitmap(x, y, snow, 40, 40);
+    else if (weather.weather_code == 75)
     timeCanvas.drawRGBBitmap(x, y, snow, 40, 40);
 
-  else if (forecast.indexOf("Overcast") > 0)
+  else if (weather.weather_code == 3)
     timeCanvas.drawRGBBitmap(x, y, cloud, 40, 40);
 }
-
+/*
 void ledBlink(void)
 {
   digitalWrite(LED_BLUE, LOW);
@@ -730,19 +671,100 @@ void ledBlink(void)
 
 */
 
-void weatherApi(float lati, float longi)
+void getWeather()
+{
+  String url = "https://api.open-meteo.com/v1/dwd-icon?latitude=";
+  url += String(weather.lat, 4);
+  url += "&longitude=";
+  url += String(weather.lon, 4);
+  url += "&timezone=auto&timeformat=unixtime";
+  url += "&&forecast_hours=12&timeformat=unixtime&hourly=temperature_2m";
+  // url += "&hourly=temperature_2m&forecast_hours=1";
+  // url = "https://api.open-meteo.com/v1/dwd-icon?latitude=-30.12&longitude=-51.27&hourly=temperature_2m";
+  Serial.println(url);
+  Serial.println("");
+
+  String payload = weatherApi(url);
+
+  // Serial.println("HTTP GET request successful");
+  // Serial.println("Response: " + payload);
+
+  // Parse the JSON string
+  DynamicJsonDocument jsonDoc(4500);
+  DeserializationError error = deserializeJson(jsonDoc, payload);
+
+  serializeJsonPretty(jsonDoc, Serial);
+  Serial.println("");
+
+  const char *_units = jsonDoc["hourly_units"]["temperature_2m"];
+  weather.units = String(_units);
+
+  for (int i = 0; i < 12; i++)
+  {
+    weather.forecast[i] = jsonDoc["hourly"]["temperature_2m"][i];
+    weather.forecastTime[i] = jsonDoc["hourly"]["time"][i];
+  }
+
+  weather.temp = weather.forecast[0];
+}
+
+void getForecast()
+{
+  String url = "https://api.open-meteo.com/v1/dwd-icon?latitude=";
+  url += String(weather.lat, 4);
+  url += "&longitude=";
+  url += String(weather.lon, 4);
+  url += "&timezone=auto";
+  // url += timeZone;
+  url += "&timeformat=unixtime";
+  url += "&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset,weather_code&forecast_days=1";
+  // url += "&hourly=temperature_2m&forecast_hours=1";
+  // url = "https://api.open-meteo.com/v1/dwd-icon?latitude=-30.12&longitude=-51.27&hourly=temperature_2m";
+  Serial.println(url);
+  Serial.println("");
+
+  String payload = weatherApi(url);
+
+  // Serial.println("HTTP GET request successful");
+  // Serial.println("Response: " + payload);
+
+  // Parse the JSON string
+  DynamicJsonDocument jsonDoc(4500);
+  DeserializationError error = deserializeJson(jsonDoc, payload);
+
+  serializeJsonPretty(jsonDoc, Serial);
+  Serial.println("");
+
+  weather.utc_offset = jsonDoc["utc_offset_seconds"];
+  Serial.println(weather.utc_offset);
+
+  u32_t _epoch = jsonDoc["daily"]["sunrise"][0];
+  _epoch += weather.utc_offset;
+  weather.sunRise = String(hour(_epoch));
+  weather.sunRise += ":";
+  weather.sunRise += String(minute(_epoch));
+
+  _epoch = jsonDoc["daily"]["sunset"][0];
+  _epoch += weather.utc_offset;
+  Serial.println(_epoch);
+
+  weather.sunSet = String(hour(_epoch));
+  weather.sunSet += ":";
+  weather.sunSet += String(minute(_epoch));
+
+  weather.weather_code = jsonDoc["daily"]["weather_code"][0];
+}
+
+String weatherApi(String url)
 {
 
-  WiFiClient client;
-  HTTPClient http;
-  String url = "https://api.open-meteo.com/v1/dwd-icon?latitude=";
-  url += lati;
-  url += "&longitude=";
-  url += longi;
-  url += "&hourly=temperature_2m";
-  Serial.println(url);
+  WiFiClientSecure client;
+  client.setInsecure(); // the magic line, use with caution
 
-  if (http.begin(client, url))
+  HTTPClient http;
+  String payload = "";
+
+  if (http.begin(client, url.c_str()))
   {
     int httpCode = http.GET();
 
@@ -750,45 +772,22 @@ void weatherApi(float lati, float longi)
     {
       if (httpCode == HTTP_CODE_OK)
       {
-        String payload = http.getString();
-        // Serial.println("HTTP GET request successful");
-        Serial.println("Response: " + payload);
-
-        // Parse the JSON string
-        DynamicJsonDocument jsonDoc(1024);
-        DeserializationError error = deserializeJson(jsonDoc, payload);
-
-        // const char *value = jsonDoc["abbreviation"];
-
-        // if (value != nullptr && value[0] != '\0')
-        //{
-        //  Check for parsing errors
-        // int offset = String(value).toInt();
-        // offset = offset * 60 * 60;
-        //  timeClient.setTimeOffset(offset);
-        // Serial.println(offset);
-        // return offset;
-        //}
-        // else
-        //{
-        //  Serial.print("Failed to parse JSON: ");
-        //  Serial.println(error.c_str());
-        //  return 0;
-        //}
+        payload = http.getString();
       }
       else
       {
         Serial.println("HTTP GET request failed");
       }
-
-      http.end();
-      // return 0;
     }
     else
     {
       Serial.println("Unable to connect to server");
-      // return 0;
     }
   }
+  http.end();
+  return payload;
 }
-// return 0;
+
+/*
+
+*/
