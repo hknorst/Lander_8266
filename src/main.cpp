@@ -32,7 +32,7 @@
   MIT license, all text above must be included in any redistribution
  *************************************************************************/
 
-#include <Arduino_GFX_Library.h>
+#include <Adafruit_ST7789.h>
 
 #include <Orbitron_Medium_40.h>
 #include <Orbitron_Bold_20.h>
@@ -42,13 +42,13 @@
 
 #include <NTPClient.h>
 // change next line to use with another board/shield
-#include <ESP8266WiFi.h>
+#include <WiFi.h>
 // #include <WiFi.h> // for WiFi shield
 // #include <WiFi101.h> // for WiFi 101 shield or MKR1000
 #include <WiFiUdp.h>
 #include <TimeLib.h>
 #include <ArduinoJson.h>
-#include <esp8266httpclient.h>
+#include <HTTPClient.h>
 
 // SYSTEM_MODE(MANUAL);
 // SYSTEM_THREAD(ENABLED);
@@ -70,34 +70,35 @@ RES       A5
 DC        A4
 *****************/
 
-#define LED_BLUE D0
-#define LED_RED D1
+#define LED_BLUE -1
+#define LED_RED -1
+#define BACKLIGHT 17
 
 // ST7789 TFT module connections
-#define TFT_DC D2  // TFT DC  pin is connected to NodeMCU pin D1 (GPIO5)
-#define TFT_RST D4 // TFT RST pin is connected to NodeMCU pin D2 (GPIO4)
-#define TFT_CS D8  // TFT CS  pin is connected to NodeMCU pin D8 (GPIO15)
+#define TFT_DC 16 // TFT DC  pin is connected to NodeMCU pin D1 (GPIO5)
+#define TFT_RST 4 // TFT RST pin is connected to NodeMCU pin D2 (GPIO4)
+#define TFT_CS 5  // TFT CS  pin is connected to NodeMCU pin D8 (GPIO15)
 // initialize ST7789 TFT library with hardware SPI module
 // SCK (CLK) ---> NodeMCU pin D5 (GPIO14)
 // MOSI(DIN) ---> NodeMCU pin D7 (GPIO13)
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+// Arduino_DataBus *bus = new Arduino_HWSPI(TFT_DC /* DC */, TFT_CS /* CS */);
+// Arduino_GFX *tft = new Arduino_ST7789(bus, TFT_RST, 2 /* rotation */);
 
-Arduino_DataBus *bus = new Arduino_HWSPI(TFT_DC /* DC */, TFT_CS /* CS */);
-Arduino_GFX *tft = new Arduino_ST7789(bus, TFT_RST, 2 /* rotation */);
-
-SHT31 sht31 = SHT31();
-// If you are using the Photon 2, please comment out the following since Photon 2 does not have a fuel gauge
-// FuelGauge fuel;
+// SHT31 sht31 = SHT31();
+//  If you are using the Photon 2, please comment out the following since Photon 2 does not have a fuel gauge
+//  FuelGauge fuel;
 
 char num = 0;
 char number[8];
 
 const float Pi = 3.14159265359;
 
-Arduino_GFX *timeCanvas = new Arduino_Canvas_3bit(240 /* width */, 110 /* height */, tft, 0, 160);
-Arduino_GFX *temperatureCanvas = new Arduino_Canvas_3bit(240 /* width */, 40 /* height */, tft, 0, 280);
+// Arduino_Canvas_Indexed *timeCanvas = new Arduino_Canvas_Indexed(240 /* width */, 110 /* height */, tft);
+// Arduino_GFX *temperatureCanvas = new Arduino_Canvas(240 /* width */, 40 /* height */, tft);
 
-// GFXcanvas16 timeCanvas(240, 110);
-// GFXcanvas16 temperatureCanvas(240, 40);
+GFXcanvas16 timeCanvas(240, 110);
+GFXcanvas16 temperatureCanvas(240, 40);
 
 String todayHigh, todayLow, dayoneHigh, dayoneLow, daytwoHigh, daytwoLow, daythreeHigh, daythreeLow;
 String todayForecast, dayoneForecast, daytwoForecast, daythreeForecast;
@@ -109,18 +110,21 @@ const long pubinterval = 600; // interval at which to publish in seconds. this i
 unsigned long intervalcount = 0;
 
 String city = "";
+float lati = 0;
+float longi = 0;
 
 void drawTimeConsole(void);
 void drawTemperatureConsole(void);
 void drawWeatherBitmap(int x, int y, String forecast);
 void ledBlink(void);
 void getCity(void);
-void getTimezone(void);
+int getTimezone(void);
+void weatherApi(void);
 
 uint32_t _epoch = 1703114897;
 
-const char *ssid = "PU3D";
-const char *password = "#printup365";
+const char *ssid = "Casa do Tadeuzinho";
+const char *password = "#1nt3rn3t!";
 
 WiFiUDP ntpUDP;
 
@@ -137,7 +141,7 @@ void setup(void)
 
   pinMode(LED_RED, OUTPUT);
   pinMode(LED_BLUE, OUTPUT);
-  pinMode(D1, OUTPUT);
+  pinMode(BACKLIGHT, OUTPUT);
 
   Serial.begin(115200);
 
@@ -151,38 +155,44 @@ void setup(void)
 
   Serial.print(F("\nHello! ST77xx TFT Test"));
 
-  // if the display has CS pin try with SPI_MODE0
-  // Init Display
-  if (!tft->begin())
-  {
-    Serial.println("tft->begin() failed!");
-  }
+  // remember to modify SPI setting as necessary for your MCU board in Adafruit_ST77xx.cpp
 
-  digitalWrite(D1, HIGH);
+  tft.init(240, 320, SPI_MODE2);
+  tft.setRotation(2);
+  tft.fillScreen(ST77XX_BLACK);
+
+  digitalWrite(BACKLIGHT, HIGH);
   timeClient.begin();
 
   Serial.println(F("\nInitialized"));
 
-  tft->setRotation(2);
-  tft->fillScreen(BLACK);
-
-  // sht31.begin();
-
   // draw the static icons
-  // tft->draw24bitRGBBitmap(15, 135, sunrise, 40, 31);
-  // tft->draw24bitRGBBitmap(85, 135, sunset, 40, 31);
-  // tft->draw24bitRGBBitmap(160, 128, isro, 68, 66);
+  tft.drawRGBBitmap(15, 135, sunrise, 40, 31);
+  tft.drawRGBBitmap(85, 135, sunset, 40, 31);
+  tft.drawRGBBitmap(160, 128, isro, 68, 66);
 
   // draw the horizontal console dividing lines
-  tft->drawLine(0, 120, 240, 120, 0x8c71); // gray
-  tft->drawLine(0, 199, 240, 199, 0x8c71); // gray
+  tft.drawLine(0, 120, 240, 120, 0x8c71); // gray
+  tft.drawLine(0, 199, 240, 199, 0x8c71); // gray
+
+  Serial.print("MOSI: ");
+  Serial.println(MOSI);
+  Serial.print("MISO: ");
+  Serial.println(MISO);
+  Serial.print("SCK: ");
+  Serial.println(SCK);
+  Serial.print("SS: ");
+  Serial.println(SS);
 
   getCity();
-  getTimezone();
+  timeClient.setTimeOffset(getTimezone());
+  timeClient.update();
   // display the time and temperature and then update it regularly in the loop function
+
+  delay(15000);
+
   drawTimeConsole();
   // drawTemperatureConsole();
-
 }
 
 void loop()
@@ -239,6 +249,8 @@ void getCity(void)
           DynamicJsonDocument jsonDoc(1024);
           DeserializationError error = deserializeJson(jsonDoc, payload);
 
+          serializeJsonPretty(jsonDoc, Serial);
+
           // Check for parsing errors
           const char *value = jsonDoc["status"];
 
@@ -246,7 +258,14 @@ void getCity(void)
           {
             const char *value = jsonDoc["city"];
             city = String(value);
+            const char *lat = jsonDoc["lat"];
+            //lati = atof(lat);
+            const char *lon = jsonDoc["lon"];
+            //longi = atof(lon);
             Serial.println(city);
+            Serial.println(value);
+            Serial.println(lat);
+            Serial.println(lon);
             return;
           }
           else
@@ -270,7 +289,7 @@ void getCity(void)
   }
 }
 
-void getTimezone(void)
+int getTimezone(void)
 {
 
   if (WiFi.status() == WL_CONNECTED)
@@ -290,11 +309,13 @@ void getTimezone(void)
         {
           String payload = http.getString();
           // Serial.println("HTTP GET request successful");
-          //Serial.println("Response: " + payload);
+          // Serial.println("Response: " + payload);
 
           // Parse the JSON string
           DynamicJsonDocument jsonDoc(1024);
           DeserializationError error = deserializeJson(jsonDoc, payload);
+
+          
 
           const char *value = jsonDoc["abbreviation"];
 
@@ -303,29 +324,33 @@ void getTimezone(void)
             // Check for parsing errors
             int offset = String(value).toInt();
             offset = offset * 60 * 60;
-            //timeClient.setTimeOffset(offset);          
+            // timeClient.setTimeOffset(offset);
             Serial.println(offset);
-            return;
+            return offset;
           }
           else
           {
             Serial.print("Failed to parse JSON: ");
             Serial.println(error.c_str());
+            return 0;
           }
         }
+        else
+        {
+          Serial.println("HTTP GET request failed");
+        }
+
+        http.end();
+        return 0;
       }
       else
       {
-        Serial.println("HTTP GET request failed");
+        Serial.println("Unable to connect to server");
+        return 0;
       }
-
-      http.end();
-    }
-    else
-    {
-      Serial.println("Unable to connect to server");
     }
   }
+  return 0;
 }
 
 /*
@@ -379,138 +404,138 @@ void drawTimeConsole(void)
   uint8_t _month = month(epoch);
   char timestring[10];
 
-  // timeCanvas->fillScreen(BLACK);
-  tft->setFont(&Lato_BoldItalic10pt7b);
-  tft->setTextSize(1);
-  tft->setTextColor(CYAN);
-  tft->setCursor(0, 30);
+  timeCanvas.fillScreen(ST77XX_BLACK);
+  timeCanvas.setFont(&Lato_BoldItalic10pt7b);
+  timeCanvas.setTextSize(1);
+  timeCanvas.setTextColor(ST77XX_CYAN);
+  timeCanvas.setCursor(0, 30);
   // timeCanvas.print("WED,19 APR,2023"); //sample string for testing
   // String data = numtoWeekday(_weekday) + ", ";
-  tft->print(numtoWeekday(_weekday));
-  tft->print(",");
+  timeCanvas.print(numtoWeekday(_weekday));
+  timeCanvas.print(",");
 
   switch (_month)
   {
   case 1:
-    tft->print("JAN ");
+    timeCanvas.print("JAN ");
     // data += "JAN";
     break;
   case 2:
-    tft->print("FEB ");
+    timeCanvas.print("FEB ");
     // data += "FEV";
     break;
   case 3:
-    tft->print("MAR ");
+    timeCanvas.print("MAR ");
     // data += "MAR";
     break;
   case 4:
     // data += "ABR";
-    tft->print("APR ");
+    timeCanvas.print("APR ");
     break;
   case 5:
     // data += "MAI";
-    tft->print("MAY ");
+    timeCanvas.print("MAY ");
     break;
   case 6:
     // data += "JUN";
-    tft->print("JUN ");
+    timeCanvas.print("JUN ");
     break;
   case 7:
     // data += "JUL";
-    tft->print("JUL ");
+    timeCanvas.print("JUL ");
     break;
   case 8:
     // data += "AGO";
-    tft->print("AUG ");
+    timeCanvas.print("AUG ");
     break;
   case 9:
     // data += "SET";
-    tft->print("SEPT ");
+    timeCanvas.print("SEPT ");
     break;
   case 10:
     // data += "OUT";
-    tft->print("OCT ");
+    timeCanvas.print("OCT ");
     break;
   case 11:
     // data += "NOV";
-    tft->print("NOV ");
+    timeCanvas.print("NOV ");
     break;
   case 12:
     // data += "DEZ";
-    tft->print("DEC ");
+    timeCanvas.print("DEC ");
     break;
   }
   // data += " ";
   // data += _day;
   // data += ", ";
   // data += _year;
-  tft->print(_day);
-  tft->print(",");
-  tft->print(_year);
-  // tft->print(data);
+  timeCanvas.print(_day);
+  timeCanvas.print(",");
+  timeCanvas.print(_year);
+  // tft.print(data);
   // Serial.print(data);
 
-  tft->setFont();
-  tft->setTextSize(1);
-  tft->setCursor(205, 14);
+  timeCanvas.setFont();
+  timeCanvas.setTextSize(1);
+  timeCanvas.setCursor(205, 14);
 
-  tft->fillRect(210, 0, 25, 10, BLUE);
+  timeCanvas.fillRect(210, 0, 25, 10, ST77XX_BLUE);
 
-  tft->fillRect(207, 3, 3, 4, BLUE);
-  tft->setTextColor(WHITE);
+  timeCanvas.fillRect(207, 3, 3, 4, ST77XX_BLUE);
+  timeCanvas.setTextColor(ST77XX_WHITE);
   // If you are using the Photon 2, please comment out the following since Photon 2 does not have a fuel gauge
   // timeCanvas.print(fuel.getVCell());timeCanvas.print("V");
 
-  tft->setFont(&Orbitron_Medium_40);
+  timeCanvas.setFont(&Orbitron_Medium_40);
 
-  tft->setTextSize(1);
-  tft->setTextColor(GREEN);
+  timeCanvas.setTextSize(1);
+  timeCanvas.setTextColor(ST77XX_GREEN);
 
-  tft->setCursor(0, 75);
+  timeCanvas.setCursor(0, 75);
   sprintf(timestring, "%02d:%02d ", _hour, _minute);
   // sprintf(timestring, "%02d:%02d ", 2, 2); //test string that is the widest when displayed
-  tft->print(timestring);
+  timeCanvas.print(timestring);
   // calculate the width of the time string so that you can appent the AM/PM at the end of it
   // this is required because the font width is not the same for all digits
   int16_t x1, y1;
   uint16_t w, h;
-  tft->getTextBounds(timestring, 0, 75, &x1, &y1, &w, &h);
+  timeCanvas.getTextBounds(timestring, 0, 75, &x1, &y1, &w, &h);
 
-  tft->setFont(&Orbitron_Bold_20);
-  tft->setTextSize(1);
-  tft->setTextColor(ORANGE); // orange
-  tft->setCursor(w, 60);
+  timeCanvas.setFont(&Orbitron_Bold_20);
+  timeCanvas.setTextSize(1);
+  timeCanvas.setTextColor(0xe469); // orange
+  timeCanvas.setCursor(w, 60);
   if (_hour > 12)
-    tft->print(" PM");
+    timeCanvas.print(" PM");
   else
-    tft->print(" AM");
+    timeCanvas.print(" AM");
 
-  tft->setFont(&Lato_BoldItalic10pt7b);
-  tft->setTextSize(1);
-  tft->setTextColor(COLOR_PINK);
-  tft->setCursor(0, 110);
-  tft->print(city);
+  timeCanvas.setFont(&Lato_BoldItalic10pt7b);
+  timeCanvas.setTextSize(1);
+  timeCanvas.setTextColor(COLOR_PINK);
+  timeCanvas.setCursor(0, 105);
+  timeCanvas.print(city);
 
   // drawWeatherBitmap(192, 45, todayForecast);
 
-  tft->setFont();
-  tft->setTextSize(2);
-  tft->setTextColor(WHITE);
+  timeCanvas.setFont();
+  timeCanvas.setTextSize(2);
+  timeCanvas.setTextColor(ST77XX_WHITE);
 
   if (todayHigh == "  ")
   {
-    tft->setCursor(205, 95);
-    tft->print(todayLow);
+    timeCanvas.setCursor(205, 95);
+    timeCanvas.print(todayLow);
   }
   else
   {
-    tft->setCursor(180, 95);
-    tft->print(todayHigh);
-    tft->print("|");
-    tft->print(todayLow);
+    timeCanvas.setCursor(180, 95);
+    timeCanvas.print(todayHigh);
+    timeCanvas.print("|");
+    timeCanvas.print(todayLow);
   }
-  // tft->flush();
-  // tft->drawRGBBitmap(0, 0, timeCanvas.getBuffer(), timeCanvas.width(), timeCanvas.height());
+  // timeCanvas->flush();
+  tft.drawRGBBitmap(0, 0, timeCanvas.getBuffer(), timeCanvas.width(), timeCanvas.height());
 }
 
 /*
@@ -704,3 +729,66 @@ void ledBlink(void)
 }
 
 */
+
+void weatherApi(float lati, float longi)
+{
+
+  WiFiClient client;
+  HTTPClient http;
+  String url = "https://api.open-meteo.com/v1/dwd-icon?latitude=";
+  url += lati;
+  url += "&longitude=";
+  url += longi;
+  url += "&hourly=temperature_2m";
+  Serial.println(url);
+
+  if (http.begin(client, url))
+  {
+    int httpCode = http.GET();
+
+    if (httpCode > 0)
+    {
+      if (httpCode == HTTP_CODE_OK)
+      {
+        String payload = http.getString();
+        // Serial.println("HTTP GET request successful");
+        Serial.println("Response: " + payload);
+
+        // Parse the JSON string
+        DynamicJsonDocument jsonDoc(1024);
+        DeserializationError error = deserializeJson(jsonDoc, payload);
+
+        // const char *value = jsonDoc["abbreviation"];
+
+        // if (value != nullptr && value[0] != '\0')
+        //{
+        //  Check for parsing errors
+        // int offset = String(value).toInt();
+        // offset = offset * 60 * 60;
+        //  timeClient.setTimeOffset(offset);
+        // Serial.println(offset);
+        // return offset;
+        //}
+        // else
+        //{
+        //  Serial.print("Failed to parse JSON: ");
+        //  Serial.println(error.c_str());
+        //  return 0;
+        //}
+      }
+      else
+      {
+        Serial.println("HTTP GET request failed");
+      }
+
+      http.end();
+      // return 0;
+    }
+    else
+    {
+      Serial.println("Unable to connect to server");
+      // return 0;
+    }
+  }
+}
+// return 0;
