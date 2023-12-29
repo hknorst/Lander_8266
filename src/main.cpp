@@ -5,7 +5,7 @@
 #include <Orbitron_Bold_20.h>
 #include <lato_Bold_Italic_20.h>
 #include <Roboto_Condensed_Light_Italic_24.h>
-#include <SHT31.h>
+#include <Adafruit_BMP085.h>
 #include <weather_icons.h>
 
 #include <NTPClient.h>
@@ -53,6 +53,7 @@ Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 // Arduino_DataBus *bus = new Arduino_HWSPI(TFT_DC /* DC */, TFT_CS /* CS */);
 // Arduino_GFX *tft = new Arduino_ST7789(bus, TFT_RST, 2 /* rotation */);
 
+Adafruit_BMP085 bmp;
 // SHT31 sht31 = SHT31();
 //  If you are using the Photon 2, please comment out the following since Photon 2 does not have a fuel gauge
 //  FuelGauge fuel;
@@ -76,6 +77,7 @@ unsigned long previousMillis = 0; // will store last time LED was updated
 const long interval = 60000;  // milliiseconds
 const long pubinterval = 600; // interval at which to publish in seconds. this is done by counting number of intervals
 unsigned long intervalcount = 0;
+bool bmpStatus = true;
 
 typedef struct
 {
@@ -108,11 +110,11 @@ void getForecast();
 
 // uint32_t _epoch = 1703114897;
 
-// const char *ssid = "Casa do Tadeuzinho";
-// const char *password = "#1nt3rn3t!";
+const char *ssid = "Casa do Tadeuzinho";
+const char *password = "#1nt3rn3t!";
 
-const char *ssid = "PU3D";
-const char *password = "#printup365";
+// const char *ssid = "PU3D";
+// const char *password = "#printup365";
 
 WiFiUDP ntpUDP;
 
@@ -139,6 +141,12 @@ void setup(void)
 
   Serial.print(F("\nHello! ST77xx TFT Test"));
 
+  if (!bmp.begin())
+  {
+    Serial.println("Could not find a valid BMP085 sensor, check wiring!");
+    bmpStatus = false;
+  }
+
   // remember to modify SPI setting as necessary for your MCU board in Adafruit_ST77xx.cpp
 
   tft.init(240, 320, SPI_MODE2);
@@ -153,22 +161,13 @@ void setup(void)
   // draw the static icons
   tft.drawRGBBitmap(15, 135, sunrise, 40, 31);
   tft.drawRGBBitmap(85, 135, sunset, 40, 31);
-  tft.drawRGBBitmap(160, 128, isro, 68, 66);
+  // tft.drawRGBBitmap(160, 128, isro, 68, 66);
+  tft.drawRGBBitmap(160, 128, nasa, 80, 66);
 
   // draw the horizontal console dividing lines
   tft.drawLine(0, 120, 240, 120, 0x8c71); // gray
   tft.drawLine(0, 199, 240, 199, 0x8c71); // gray
 
-  /*
-    Serial.print("MOSI: ");
-    Serial.println(MOSI);
-    Serial.print("MISO: ");
-    Serial.println(MISO);
-    Serial.print("SCK: ");
-    Serial.println(SCK);
-    Serial.print("SS: ");
-    Serial.println(SS);
-  */
   getCity();
   getWeather();
   getForecast();
@@ -176,8 +175,6 @@ void setup(void)
   timeClient.update();
 
   // display the time and temperature and then update it regularly in the loop function
-
-  // delay(15000);
 
   getSunriseSunset();
 
@@ -196,19 +193,28 @@ void loop()
       getCity();
     }
 
-    int i = 0;
-    for (i; i < 12; i++)
+    if (bmpStatus)
     {
-      if (hour(timeClient.getEpochTime()) == hour(weather.forecastTime[i]))
-        weather.temp = weather.forecast[i];
-      break;
+      weather.temp = bmp.readTemperature();
     }
-    Serial.println(i);
-
-    if (i > 11)
+    else
     {
-      Serial.println("Updating hourly forecast");
-      getForecast(); // update hourly forecast temp
+      int i = 0;
+      for (i; i < 12; i++)
+      {
+        if (hour(timeClient.getEpochTime()) == hour(weather.forecastTime[i]))
+        {
+          weather.temp = weather.forecast[i];
+          break;
+        }
+      }
+      Serial.println(i);
+
+      if (i > 11)
+      {
+        Serial.println("Updating hourly forecast");
+        getWeather(); // update hourly forecast temp
+      }
     }
 
     drawTimeConsole();
@@ -216,6 +222,34 @@ void loop()
 
     // ledBlink();
     intervalcount++;
+
+    Serial.print("Temperature = ");
+    Serial.print(bmp.readTemperature());
+    Serial.println(" *C");
+
+    Serial.print("Pressure = ");
+    Serial.print(bmp.readPressure());
+    Serial.println(" Pa");
+
+    // Calculate altitude assuming 'standard' barometric
+    // pressure of 1013.25 millibar = 101325 Pascal
+    Serial.print("Altitude = ");
+    Serial.print(bmp.readAltitude());
+    Serial.println(" meters");
+
+    Serial.print("Pressure at sealevel (calculated) = ");
+    Serial.print(bmp.readSealevelPressure());
+    Serial.println(" Pa");
+
+    // you can get a more precise measurement of altitude
+    // if you know the current sea level pressure which will
+    // vary with weather and such. If it is 1015 millibars
+    // that is equal to 101500 Pascals.
+    Serial.print("Real altitude = ");
+    Serial.print(bmp.readAltitude(101500));
+    Serial.println(" meters");
+
+    Serial.println();
   }
   if (intervalcount > pubinterval)
   {
@@ -294,13 +328,21 @@ void getCity(void)
 // The webhook response data will contain the sunrise and sunset time together as a string
 void getSunriseSunset(void)
 {
+  int16_t x1, y1;
+  uint16_t w, h;
+
   tft.setTextColor(ST77XX_YELLOW, ST77XX_BLACK);
   tft.setFont();
   tft.setTextSize(2);
-  tft.setCursor(5, 175);
+  tft.getTextBounds(weather.sunRise, 5, 175, &x1, &y1, &w, &h); // get boundaries of drawn text
+  tft.setCursor(int(15 - ((w - 40) / 2)), 175);                 // the icon offset minus the the half diference
   tft.print(weather.sunRise);
-  tft.setCursor(85, 175);
+  tft.getTextBounds(weather.sunSet, 85, 175, &x1, &y1, &w, &h);
+  tft.setCursor(int(85 - ((w - 40) / 2)), 175);
   tft.print(weather.sunSet);
+
+  Serial.println(w);
+  Serial.println(h);
 }
 
 String numtoWeekday(int num)
@@ -450,7 +492,7 @@ void drawTimeConsole(void)
   timeCanvas.setFont(&Lato_BoldItalic10pt7b);
   timeCanvas.setTextSize(1);
   timeCanvas.setTextColor(COLOR_PINK);
-  timeCanvas.setCursor(0, 105);
+  timeCanvas.setCursor(5, 105);
   timeCanvas.print(weather.city);
 
   drawWeatherBitmap(192, 45);
@@ -459,19 +501,22 @@ void drawTimeConsole(void)
   timeCanvas.setTextSize(2);
   timeCanvas.setTextColor(ST77XX_WHITE);
 
-  if (todayHigh == "  ")
-  {
-    timeCanvas.setCursor(205, 95);
-    timeCanvas.print(todayLow);
-  }
-  else
-  {
-    timeCanvas.setCursor(180, 95);
-    timeCanvas.print(todayHigh);
-    timeCanvas.print("|");
-    timeCanvas.print(todayLow);
-  }
-  // timeCanvas->flush();
+  timeCanvas.getTextBounds(String(weather.temp), 192, 95, &x1, &y1, &w, &h);
+  timeCanvas.setCursor(int(192 - ((w - 192) / 2)), 95);
+  timeCanvas.print(weather.temp);
+  // if (todayHigh == "  ")
+  //{
+  //   timeCanvas.setCursor(205, 95);
+  //   timeCanvas.print(todayLow);
+  // }
+  // else
+  //{
+  //   timeCanvas.setCursor(180, 95);
+  //   timeCanvas.print(todayHigh);
+  //   timeCanvas.print("|");
+  //   timeCanvas.print(todayLow);
+  // }
+  //  timeCanvas->flush();
   tft.drawRGBBitmap(0, 0, timeCanvas.getBuffer(), timeCanvas.width(), timeCanvas.height());
 }
 
@@ -638,9 +683,9 @@ void drawWeatherBitmap(int x, int y)
 
   else if (weather.weather_code == 71)
     timeCanvas.drawRGBBitmap(x, y, snow, 40, 40);
-    else if (weather.weather_code == 73)
+  else if (weather.weather_code == 73)
     timeCanvas.drawRGBBitmap(x, y, snow, 40, 40);
-    else if (weather.weather_code == 75)
+  else if (weather.weather_code == 75)
     timeCanvas.drawRGBBitmap(x, y, snow, 40, 40);
 
   else if (weather.weather_code == 3)
@@ -703,6 +748,9 @@ void getWeather()
   {
     weather.forecast[i] = jsonDoc["hourly"]["temperature_2m"][i];
     weather.forecastTime[i] = jsonDoc["hourly"]["time"][i];
+    weather.forecastTime[i] += weather.utc_offset;
+    Serial.println(weather.forecast[i]);
+    Serial.println(weather.forecastTime[i]);
   }
 
   weather.temp = weather.forecast[0];
