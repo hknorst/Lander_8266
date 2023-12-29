@@ -8,6 +8,10 @@
 #include <Adafruit_BMP085.h>
 #include <weather_icons.h>
 
+#include <BluetoothSerial.h>
+#include "driver/adc.h"
+#include <esp_bt.h>
+
 #include <NTPClient.h>
 // change next line to use with another board/shield
 #include <WiFi.h>
@@ -17,10 +21,6 @@
 #include <TimeLib.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
-
-// SYSTEM_MODE(MANUAL);
-// SYSTEM_THREAD(ENABLED);
-// SerialLogHandler logHandler(LOG_LEVEL_TRACE);
 
 // RGB565 custom colors
 #define COLOR_PINK 0xf816
@@ -79,6 +79,12 @@ const long pubinterval = 600; // interval at which to publish in seconds. this i
 unsigned long intervalcount = 0;
 bool bmpStatus = true;
 
+uint32_t modemSleepMillis = 0;
+#define MODEMSLEEP 3000
+bool flagModemSleep = true;
+
+RTC_DATA_ATTR int bootCount = 0; // data saved during sleep
+
 typedef struct
 {
   String city = "";
@@ -89,8 +95,10 @@ typedef struct
   float lat = 0;
   float lon = 0;
   float temp = 0;
-  float forecast[12];
+  int humidity = 0;
+  float forecastTemperature[12];
   uint32_t forecastTime[12];
+  int forecastHumidity[12];
   String units = "";
   int weather_code = 0;
 } Weather;
@@ -108,13 +116,19 @@ void getSunriseSunset();
 void getWeather();
 void getForecast();
 
+void disableWiFi();
+void setModemSleep();
+void disableBluetooth();
+void enableWiFi();
+void wakeModemSleep();
+
 // uint32_t _epoch = 1703114897;
 
-const char *ssid = "Casa do Tadeuzinho";
-const char *password = "#1nt3rn3t!";
+// const char *ssid = "Casa do Tadeuzinho";
+// const char *password = "#1nt3rn3t!";
 
-// const char *ssid = "PU3D";
-// const char *password = "#printup365";
+const char *ssid = "PU3D";
+const char *password = "#printup365";
 
 WiFiUDP ntpUDP;
 
@@ -129,7 +143,7 @@ void setup(void)
   pinMode(LED_BLUE, OUTPUT);
   pinMode(BACKLIGHT, OUTPUT);
 
-  Serial.begin(115200);
+  Serial.begin(9600);
 
   WiFi.begin(ssid, password);
 
@@ -174,12 +188,25 @@ void setup(void)
   timeClient.setTimeOffset(weather.utc_offset);
   timeClient.update();
 
+  delay(1000);
+
+  setModemSleep();
+
   // display the time and temperature and then update it regularly in the loop function
 
   getSunriseSunset();
 
   drawTimeConsole();
   drawTemperatureConsole();
+
+  // esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+
+  // uint32_t lastEpoch = timeClient.getEpochTime();
+
+  // while (minute(timeClient.getEpochTime()) <= minute(lastEpoch)){
+  //   delay(50);
+  // }
+  previousMillis = millis();
 }
 
 void loop()
@@ -193,70 +220,39 @@ void loop()
       getCity();
     }
 
+    int i = 0;
+    for (i; i < 12; i++)
+    {
+      if (hour(timeClient.getEpochTime()) == hour(weather.forecastTime[i]))
+      {
+        weather.temp = weather.forecastTemperature[i];
+        weather.humidity = weather.forecastHumidity[i];
+        break;
+      }
+    }
+    Serial.println(i);
+
+    if (i > 11)
+    {
+      Serial.println("Updating hourly forecast");
+      wakeModemSleep();
+      getWeather(); // update hourly forecast temp
+      modemSleepMillis = millis();
+      flagModemSleep = false;
+    }
+
     if (bmpStatus)
     {
       weather.temp = bmp.readTemperature();
     }
-    else
-    {
-      int i = 0;
-      for (i; i < 12; i++)
-      {
-        if (hour(timeClient.getEpochTime()) == hour(weather.forecastTime[i]))
-        {
-          weather.temp = weather.forecast[i];
-          break;
-        }
-      }
-      Serial.println(i);
-
-      if (i > 11)
-      {
-        Serial.println("Updating hourly forecast");
-        getWeather(); // update hourly forecast temp
-      }
-    }
 
     drawTimeConsole();
     drawTemperatureConsole();
-
-    // ledBlink();
-    intervalcount++;
-
-    Serial.print("Temperature = ");
-    Serial.print(bmp.readTemperature());
-    Serial.println(" *C");
-
-    Serial.print("Pressure = ");
-    Serial.print(bmp.readPressure());
-    Serial.println(" Pa");
-
-    // Calculate altitude assuming 'standard' barometric
-    // pressure of 1013.25 millibar = 101325 Pascal
-    Serial.print("Altitude = ");
-    Serial.print(bmp.readAltitude());
-    Serial.println(" meters");
-
-    Serial.print("Pressure at sealevel (calculated) = ");
-    Serial.print(bmp.readSealevelPressure());
-    Serial.println(" Pa");
-
-    // you can get a more precise measurement of altitude
-    // if you know the current sea level pressure which will
-    // vary with weather and such. If it is 1015 millibars
-    // that is equal to 101500 Pascals.
-    Serial.print("Real altitude = ");
-    Serial.print(bmp.readAltitude(101500));
-    Serial.println(" meters");
-
-    Serial.println();
   }
-  if (intervalcount > pubinterval)
+  if ((currentMillis - modemSleepMillis >= MODEMSLEEP) & !flagModemSleep)
   {
-    intervalcount = 0;
-    String data = String(10);
-    // Particle.publish("get_day_weather", data, PRIVATE);
-    // Particle.publish("get_night_weather", data, PRIVATE);
+    flagModemSleep = true;
+    setModemSleep();
   }
 }
 
@@ -522,8 +518,8 @@ void drawTimeConsole(void)
 
 void drawTemperatureConsole(void)
 {
-  float temp = 30; //((sht31.getTemperature()) * 1.8) + 32;
-  float hum = 55;  // sht31.getHumidity();
+  // float temp = 30; //((sht31.getTemperature()) * 1.8) + 32;
+  // float hum = 55;  // sht31.getHumidity();
 
   temperatureCanvas.fillScreen(ST77XX_BLACK);
   temperatureCanvas.drawRGBBitmap(5, 10, thermometer, 15, 30);
@@ -535,7 +531,7 @@ void drawTemperatureConsole(void)
   temperatureCanvas.print(weather.temp);
   temperatureCanvas.print(weather.units);
   temperatureCanvas.setCursor(140, 30);
-  temperatureCanvas.print(hum);
+  temperatureCanvas.print(weather.humidity);
   temperatureCanvas.print("%rH");
 
   tft.drawRGBBitmap(0, 200, temperatureCanvas.getBuffer(), temperatureCanvas.width(), temperatureCanvas.height());
@@ -723,16 +719,11 @@ void getWeather()
   url += "&longitude=";
   url += String(weather.lon, 4);
   url += "&timezone=auto&timeformat=unixtime";
-  url += "&&forecast_hours=12&timeformat=unixtime&hourly=temperature_2m";
-  // url += "&hourly=temperature_2m&forecast_hours=1";
-  // url = "https://api.open-meteo.com/v1/dwd-icon?latitude=-30.12&longitude=-51.27&hourly=temperature_2m";
+  url += "&&forecast_hours=12&timeformat=unixtime&hourly=temperature_2m,relative_humidity_2m";
   Serial.println(url);
   Serial.println("");
 
   String payload = weatherApi(url);
-
-  // Serial.println("HTTP GET request successful");
-  // Serial.println("Response: " + payload);
 
   // Parse the JSON string
   DynamicJsonDocument jsonDoc(4500);
@@ -746,14 +737,14 @@ void getWeather()
 
   for (int i = 0; i < 12; i++)
   {
-    weather.forecast[i] = jsonDoc["hourly"]["temperature_2m"][i];
+    weather.forecastTemperature[i] = jsonDoc["hourly"]["temperature_2m"][i];
+    weather.forecastHumidity[i] = jsonDoc["hourly"]["relative_humidity_2m"][i];
     weather.forecastTime[i] = jsonDoc["hourly"]["time"][i];
     weather.forecastTime[i] += weather.utc_offset;
-    Serial.println(weather.forecast[i]);
-    Serial.println(weather.forecastTime[i]);
   }
 
-  weather.temp = weather.forecast[0];
+  weather.temp = weather.forecastTemperature[0];
+  weather.humidity = weather.forecastHumidity[0];
 }
 
 void getForecast()
@@ -836,6 +827,58 @@ String weatherApi(String url)
   return payload;
 }
 
-/*
+void disableWiFi()
+{
+  adc_power_off();
+  WiFi.disconnect(true); // Disconnect from the network
+  WiFi.mode(WIFI_OFF);   // Switch WiFi off
+  Serial.println("");
+  Serial.println("WiFi disconnected!");
+}
+void disableBluetooth()
+{
+  // Quite unusefully, no relevable power consumption
+  btStop();
+  Serial.println("");
+  Serial.println("Bluetooth stop!");
+}
 
-*/
+void setModemSleep()
+{
+  disableWiFi();
+  disableBluetooth();
+  setCpuFrequencyMhz(40);
+  // Use this if 40Mhz is not supported
+  // setCpuFrequencyMhz(80);
+}
+
+void enableWiFi()
+{
+  adc_power_on();
+  delay(200);
+
+  WiFi.disconnect(false); // Reconnect the network
+  WiFi.mode(WIFI_STA);    // Switch WiFi off
+
+  delay(200);
+
+  Serial.println("START WIFI");
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void wakeModemSleep()
+{
+  setCpuFrequencyMhz(80);
+  enableWiFi();
+}
