@@ -7,6 +7,7 @@
 #include <Roboto_Condensed_Light_Italic_24.h>
 #include <Adafruit_BMP085.h>
 #include <weather_icons.h>
+#include <new_weather_icons.h>
 
 #include <BluetoothSerial.h>
 #include "driver/adc.h"
@@ -21,6 +22,8 @@
 #include <TimeLib.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
+
+#include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
 
 // RGB565 custom colors
 #define COLOR_PINK 0xf816
@@ -55,13 +58,6 @@ Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 
 Adafruit_BMP085 bmp;
 // SHT31 sht31 = SHT31();
-//  If you are using the Photon 2, please comment out the following since Photon 2 does not have a fuel gauge
-//  FuelGauge fuel;
-
-char num = 0;
-char number[8];
-
-const float Pi = 3.14159265359;
 
 // Arduino_Canvas_Indexed *timeCanvas = new Arduino_Canvas_Indexed(240 /* width */, 110 /* height */, tft);
 // Arduino_GFX *temperatureCanvas = new Arduino_Canvas(240 /* width */, 40 /* height */, tft);
@@ -69,19 +65,7 @@ const float Pi = 3.14159265359;
 GFXcanvas16 timeCanvas(240, 110);
 GFXcanvas16 temperatureCanvas(240, 40);
 
-String todayHigh, todayLow, dayoneHigh, dayoneLow, daytwoHigh, daytwoLow, daythreeHigh, daythreeLow;
-String todayForecast, dayoneForecast, daytwoForecast, daythreeForecast;
-
-unsigned long previousMillis = 0; // will store last time LED was updated
-// constants won't change:
-const long interval = 60000;  // milliiseconds
-const long pubinterval = 600; // interval at which to publish in seconds. this is done by counting number of intervals
-unsigned long intervalcount = 0;
 bool bmpStatus = true;
-
-uint32_t modemSleepMillis = 0;
-#define MODEMSLEEP 3000
-bool flagModemSleep = true;
 
 RTC_DATA_ATTR int bootCount = 0; // data saved during sleep
 
@@ -116,19 +100,14 @@ void getSunriseSunset();
 void getWeather();
 void getForecast();
 
-void disableWiFi();
-void setModemSleep();
-void disableBluetooth();
-void enableWiFi();
-void wakeModemSleep();
-
-// uint32_t _epoch = 1703114897;
-
 // const char *ssid = "Casa do Tadeuzinho";
 // const char *password = "#1nt3rn3t!";
 
-const char *ssid = "PU3D";
-const char *password = "#printup365";
+// const char *ssid = "PU3D";
+// const char *password = "#printup365";
+
+const char *ssid = "knorst";
+const char *password = "#1nt3rn3t!";
 
 WiFiUDP ntpUDP;
 
@@ -137,21 +116,72 @@ WiFiUDP ntpUDP;
 // update interval (in milliseconds, can be changed using setUpdateInterval() ).
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
 
+#define uS_TO_S_FACTOR 1000000ULL /* Conversion factor for micro seconds to seconds */
+#define TIME_TO_SLEEP 60          /* Time ESP32 will go to sleep (in seconds) */
+
 void setup(void)
 {
   pinMode(LED_RED, OUTPUT);
   pinMode(LED_BLUE, OUTPUT);
   pinMode(BACKLIGHT, OUTPUT);
 
-  Serial.begin(9600);
+  Serial.begin(115200);
 
-  WiFi.begin(ssid, password);
+  tft.init(240, 320, SPI_MODE2);
+  tft.setRotation(2);
+  tft.fillScreen(ST77XX_BLACK);
 
-  while (WiFi.status() != WL_CONNECTED)
+  digitalWrite(BACKLIGHT, HIGH);
+
+  // WiFi.begin(ssid, password);
+  // WiFi.begin(ssid, WPA2_AUTH_PEAP, username, password);
+
+  // while (WiFi.status() != WL_CONNECTED)
+  //{
+  //   delay(500);
+  //   Serial.print(".");
+  // }
+
+  // WiFiManager, Local intialization. Once its business is done, there is no need to keep it around
+  WiFiManager wm;
+
+  // reset settings - wipe stored credentials for testing
+  // these are stored by the esp library
+  // wm.resetSettings();
+
+  // Automatically connect using saved credentials,
+  // if connection fails, it starts an access point with the specified name ( "AutoConnectAP"),
+  // if empty will auto generate SSID, if password is blank it will be anonymous AP (wm.autoConnect())
+  // then goes into a blocking loop awaiting configuration and will return success result
+
+  bool res;
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextColor(ST77XX_GREEN, ST77XX_BLACK);
+  tft.setFont();
+  tft.setTextSize(2);
+  tft.print("WiFi connecting...");
+  res = wm.autoConnect(); // auto generated AP name from chipid
+  // res = wm.autoConnect("AutoConnectAP"); // anonymous ap
+  // res = wm.autoConnect("AutoConnectAP","password"); // password protected ap
+
+  if (!res)
   {
-    delay(500);
-    Serial.print(".");
+    Serial.println("Failed to connect");
+    tft.fillScreen(ST77XX_BLACK);
+    tft.setTextColor(ST77XX_RED, ST77XX_BLACK);
+    tft.setFont();
+    tft.setTextSize(2);
+    tft.print("WiFi error");
+
+    while (true)
+    {
+    }
+    // ESP.restart();
   }
+
+  tft.fillScreen(ST77XX_BLACK);
+  // if you get here you have connected to the WiFi
+  Serial.println("connected...yeey :)");
 
   Serial.print(F("\nHello! ST77xx TFT Test"));
 
@@ -163,11 +193,6 @@ void setup(void)
 
   // remember to modify SPI setting as necessary for your MCU board in Adafruit_ST77xx.cpp
 
-  tft.init(240, 320, SPI_MODE2);
-  tft.setRotation(2);
-  tft.fillScreen(ST77XX_BLACK);
-
-  digitalWrite(BACKLIGHT, HIGH);
   timeClient.begin();
 
   Serial.println(F("\nInitialized"));
@@ -188,72 +213,55 @@ void setup(void)
   timeClient.setTimeOffset(weather.utc_offset);
   timeClient.update();
 
-  delay(1000);
-
-  setModemSleep();
-
   // display the time and temperature and then update it regularly in the loop function
 
   getSunriseSunset();
 
   drawTimeConsole();
   drawTemperatureConsole();
-
-  // esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
-
-  // uint32_t lastEpoch = timeClient.getEpochTime();
-
-  // while (minute(timeClient.getEpochTime()) <= minute(lastEpoch)){
-  //   delay(50);
-  // }
-  previousMillis = millis();
 }
 
 void loop()
 {
-  unsigned long currentMillis = millis();
-  if (currentMillis - previousMillis >= interval)
+  if (weather.city == "")
   {
-    previousMillis = currentMillis;
-    if (weather.city == "")
-    {
-      getCity();
-    }
-
-    int i = 0;
-    for (i; i < 12; i++)
-    {
-      if (hour(timeClient.getEpochTime()) == hour(weather.forecastTime[i]))
-      {
-        weather.temp = weather.forecastTemperature[i];
-        weather.humidity = weather.forecastHumidity[i];
-        break;
-      }
-    }
-    Serial.println(i);
-
-    if (i > 11)
-    {
-      Serial.println("Updating hourly forecast");
-      wakeModemSleep();
-      getWeather(); // update hourly forecast temp
-      modemSleepMillis = millis();
-      flagModemSleep = false;
-    }
-
-    if (bmpStatus)
-    {
-      weather.temp = bmp.readTemperature();
-    }
-
-    drawTimeConsole();
-    drawTemperatureConsole();
+    getCity();
   }
-  if ((currentMillis - modemSleepMillis >= MODEMSLEEP) & !flagModemSleep)
+
+  int i = 0;
+  for (i; i < 12; i++)
   {
-    flagModemSleep = true;
-    setModemSleep();
+    if (hour(timeClient.getEpochTime()) == hour(weather.forecastTime[i]))
+    {
+      weather.temp = weather.forecastTemperature[i];
+      weather.humidity = weather.forecastHumidity[i];
+      break;
+    }
   }
+  Serial.println(i);
+
+  if (i > 11)
+  {
+    Serial.println("Updating hourly forecast");
+    getWeather(); // update hourly forecast temp
+    timeClient.update();
+  }
+
+  if (bmpStatus)
+  {
+    weather.temp = bmp.readTemperature();
+  }
+
+  drawTimeConsole();
+  drawTemperatureConsole();
+
+  String timeNow = String(timeClient.getHours()) + ":" + String(timeClient.getMinutes()) + ":" + String(timeClient.getSeconds());
+  Serial.println(timeNow + " - Going to light-sleep now");
+  int updateSecs = 60 - timeClient.getSeconds();
+  Serial.println("Update in: " + String(updateSecs));
+  Serial.flush();
+  esp_sleep_enable_timer_wakeup(updateSecs * uS_TO_S_FACTOR);
+  esp_light_sleep_start();
 }
 
 void getCity(void)
@@ -365,14 +373,11 @@ String numtoWeekday(int num)
 
 void drawTimeConsole(void)
 {
+  uint32_t epoch = timeClient.getEpochTime();
+  uint8_t _hour = timeClient.getHours();
+  uint8_t _minute = timeClient.getMinutes();
+  uint8_t _second = timeClient.getSeconds();
 
-  u32_t epoch = timeClient.getEpochTime();
-  Serial.println(epoch);
-
-  // u32_t epoch = _epoch;
-  uint8_t _hour = hour(epoch);
-  uint8_t _minute = minute(epoch);
-  uint8_t _second = second(epoch);
   uint8_t _weekday = weekday(epoch);
   uint8_t _day = day(epoch);
   uint16_t _year = year(epoch);
@@ -647,6 +652,9 @@ void getDayWeather(const char *event, const char *day_data)
 */
 void drawWeatherBitmap(int x, int y)
 {
+  // timeCanvas.drawRGBBitmap(x, y, night, 40, 40);
+  // return;
+
   if (weather.weather_code == 0)
     timeCanvas.drawRGBBitmap(x, y, sunny, 40, 40);
 
@@ -663,7 +671,7 @@ void drawWeatherBitmap(int x, int y)
     timeCanvas.drawRGBBitmap(x, y, cloudy, 40, 40);
 
   else if (weather.weather_code == 3)
-    timeCanvas.drawRGBBitmap(x, y, cloud, 40, 40);
+    timeCanvas.drawRGBBitmap(x, y, partial_cloudy, 40, 40);
 
   // else if (!strcmp(forecast.c_str(), "Windy"))
   //   timeCanvas.drawRGBBitmap(x, y, windy, 40, 40);
@@ -675,7 +683,7 @@ void drawWeatherBitmap(int x, int y)
     timeCanvas.drawRGBBitmap(x, y, rain, 40, 40);
 
   else if (weather.weather_code == 95)
-    timeCanvas.drawRGBBitmap(x, y, rain_thunder, 40, 40);
+    timeCanvas.drawRGBBitmap(x, y, thunderStorm, 40, 40);
 
   else if (weather.weather_code == 71)
     timeCanvas.drawRGBBitmap(x, y, snow, 40, 40);
@@ -825,60 +833,4 @@ String weatherApi(String url)
   }
   http.end();
   return payload;
-}
-
-void disableWiFi()
-{
-  adc_power_off();
-  WiFi.disconnect(true); // Disconnect from the network
-  WiFi.mode(WIFI_OFF);   // Switch WiFi off
-  Serial.println("");
-  Serial.println("WiFi disconnected!");
-}
-void disableBluetooth()
-{
-  // Quite unusefully, no relevable power consumption
-  btStop();
-  Serial.println("");
-  Serial.println("Bluetooth stop!");
-}
-
-void setModemSleep()
-{
-  disableWiFi();
-  disableBluetooth();
-  setCpuFrequencyMhz(40);
-  // Use this if 40Mhz is not supported
-  // setCpuFrequencyMhz(80);
-}
-
-void enableWiFi()
-{
-  adc_power_on();
-  delay(200);
-
-  WiFi.disconnect(false); // Reconnect the network
-  WiFi.mode(WIFI_STA);    // Switch WiFi off
-
-  delay(200);
-
-  Serial.println("START WIFI");
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-}
-
-void wakeModemSleep()
-{
-  setCpuFrequencyMhz(80);
-  enableWiFi();
 }
